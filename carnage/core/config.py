@@ -41,7 +41,7 @@ class Configuration:
                 "initial_tab": "news",
                 "compact_mode": False,
                 "ignore_warnings": False,
-                "terminal": [],
+                "terminal": ["foot"],
             },
             "browse": {
                 "search_flags": ["-f", "2"],
@@ -65,56 +65,46 @@ class Configuration:
 
         timestamp: str = datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_path: Path = self.config_path.parent / f"{self.config_path.name}.{timestamp}.old"
-
         shutil.copy2(self.config_path, backup_path)
 
     def _migrate_config(self) -> None:
-        """
-        Migrate configuration by backing up old and creating new default.
-        """
-        # Backup existing config
+        """Backup old config and create new default."""
         self._backup_config()
-
-        # Create fresh default configuration
         self._create_default_config()
-
-        # Reload the new configuration
         self._load_config()
 
     def _validate_config_structure(self) -> bool:
         """
         Validate that all expected sections and options are present.
-
-        Returns:
-            True if config is valid, False if migration is needed
+        Adds missing options from defaults instead of migrating whole file.
         """
         default_config = self._get_default_config()
+        changed = False
 
-        # Check if all main sections exist
-        for section in default_config.keys():
-            if section not in self._config:
-                return False
-
-        # Check if all expected options exist in each section
         for section, options in default_config.items():
+            # Add missing sections
             if section not in self._config:
-                return False
+                self._config[section] = options.copy()
+                changed = True
+                continue
 
-            for option in options.keys():
+            # Add missing options
+            for option, default_value in options.items():
                 if option not in self._config[section]:
-                    return False
+                    self._config[section][option] = default_value
+                    changed = True
+
+        # Save only if we added missing keys
+        if changed:
+            self._save_config()
 
         return True
 
     def _create_default_config(self) -> None:
         """Create default configuration file with comments."""
-        # Ensure config directory exists
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
-
-        # Create TOML document with comments
         doc: TOMLDocument = tomlkit.document()
 
-        # Add header comment
         doc.add(tomlkit.comment("Carnage configuration file"))
         doc.add(tomlkit.comment("This file was automatically generated"))
         doc.add(tomlkit.nl())
@@ -141,7 +131,7 @@ class Configuration:
         global_section.add(tomlkit.nl())
         global_section.add(tomlkit.comment("Terminal to execute actions with. Leave empty to execute as a subprocess"))
         global_section.add(tomlkit.comment('Example: ["xterm", "-e"]'))
-        global_section.add("terminal", tomlkit.array())
+        global_section.add("terminal", tomlkit.array().append("foot"))
         doc.add("global", global_section)
 
         # Browse section
@@ -181,13 +171,11 @@ class Configuration:
         use_section.add("cache_max_age", 96)
         doc.add("use", use_section)
 
-        # Write to file
         with open(self.config_path, "w", encoding="utf-8") as f:
             f.write(tomlkit.dumps(doc))
 
     def _load_config(self) -> None:
         """Load configuration from file or create default."""
-        # Ensure config directory exists
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
 
         if not self.config_path.exists():
@@ -197,32 +185,22 @@ class Configuration:
         try:
             with open(self.config_path, "r", encoding="utf-8") as f:
                 self._toml_doc = tomlkit.parse(f.read())
-                # Convert to plain dict for easy access
                 self._config = self._toml_doc.unwrap()
 
-            # Validate configuration structure
-            if not self._validate_config_structure():
-                self._migrate_config()
+            self._validate_config_structure()
 
         except (TOMLKitError, OSError, ImportError):
-            # Migrate if config is corrupted or unreadable
             self._migrate_config()
 
     def _save_config(self) -> None:
         """Save current configuration to file preserving comments."""
         if self._toml_doc is None:
-            # Create new document if we don't have one
             self._toml_doc = tomlkit.document()
-
-        # Ensure config directory exists
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
-
-        # Write back to file
         with open(self.config_path, "w", encoding="utf-8") as f:
             f.write(tomlkit.dumps(self._toml_doc))
 
     def _get_nested_value(self, keys: List[str], default: Any = None) -> Any:
-        """Get a nested value from the configuration."""
         current = self._config
         for key in keys:
             if isinstance(current, dict) and key in current:
@@ -232,7 +210,6 @@ class Configuration:
         return current
 
     def _set_nested_value(self, keys: List[str], value: Any) -> None:
-        """Set a nested value in the configuration."""
         current = self._config
         for key in keys[:-1]:
             if key not in current or not isinstance(current[key], dict):
@@ -243,94 +220,68 @@ class Configuration:
     # Global settings
     @property
     def theme(self) -> str:
-        """Get the theme setting."""
         return self._get_nested_value(["global", "theme"], "textual-dark")
 
     @theme.setter
     def theme(self, value: str) -> None:
-        """Set the theme setting."""
         self._set_nested_value(["global", "theme"], value)
-
         if self._toml_doc:
-            self._toml_doc["global"]["theme"] = self.theme # type: ignore
-
+            self._toml_doc["global"]["theme"] = self.theme  # type: ignore
         self._save_config()
 
     @property
     def privilege_backend(self) -> str:
-        """Get the privilege escalation backend setting."""
         return self._get_nested_value(["global", "privilege_backend"], "auto")
 
     @property
     def initial_tab(self) -> str:
-        """Get the initial tab selected."""
         return self._get_nested_value(["global", "initial_tab"], "news")
 
     @property
     def compact_mode(self) -> bool:
-        """Get the compact mode setting."""
         return self._get_nested_value(["global", "compact_mode"], False)
 
     @property
     def ignore_warnings(self) -> bool:
-        """Get whether to ignore warnings system-wide."""
         return self._get_nested_value(["global", "ignore_warnings"], False)
 
     @property
     def terminal(self) -> List[str]:
-        """Get terminal."""
         return self._get_nested_value(["global", "terminal"], [])
 
     @property
     def search_flags(self) -> List[str]:
-        """Get the search flags for package browsing."""
         return self._get_nested_value(["browse", "search_flags"], ["-f", "2"])
 
     @property
     def browse_minimum_characters(self) -> int:
-        """Get the minimum characters for browse search."""
         return self._get_nested_value(["browse", "minimum_characters"], 3)
 
     @property
     def skip_package_counting(self) -> bool:
-        """Get whether to skip package counting for overlays."""
         return self._get_nested_value(["overlays", "skip_package_counting"], True)
 
     @property
     def overlays_cache_max_age(self) -> int:
-        """Get the cache max age for overlays in hours."""
         return self._get_nested_value(["overlays", "cache_max_age"], 72)
 
     @property
     def overlay_source(self) -> str:
-        """Get the overlay metadata source URL."""
-        return self._get_nested_value(["overlays", "overlay_source"], "https://api.gentoo.org/overlays/repositories.xml")
+        return self._get_nested_value(["overlays", "overlay_source"],
+                                      "https://api.gentoo.org/overlays/repositories.xml")
 
     @property
     def use_minimum_characters(self) -> int:
-        """Get the minimum characters for USE flag search."""
         return self._get_nested_value(["use", "minimum_characters"], 3)
 
     @property
     def use_cache_max_age(self) -> int:
-        """Get the cache max age for USE flags in hours."""
         return self._get_nested_value(["use", "cache_max_age"], 96)
 
     def reload(self) -> None:
-        """Reload configuration from file."""
         self._load_config()
 
     def get(self, key: str, default: Any = None) -> Any:
-        """
-        Get a configuration value by dot notation.
-
-        Args:
-            key: Dot notation key (e.g., "global.theme")
-            default: Default value if key not found
-
-        Returns:
-            Configuration value or default
-        """
         keys: list[str] = key.split(".")
         return self._get_nested_value(keys, default)
 
@@ -340,18 +291,7 @@ _config_instance: Configuration | None = None
 
 
 def get_config(config_path: Path | None = None) -> Configuration:
-    """
-    Get the global configuration instance.
-
-    Args:
-        config_path: Optional path to config file
-
-    Returns:
-        Configuration instance
-    """
     global _config_instance
-
     if _config_instance is None:
         _config_instance = Configuration(arg_cfg_path or config_path)
-
     return _config_instance

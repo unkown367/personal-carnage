@@ -2,11 +2,34 @@
 
 import shutil
 import subprocess
+import logging
+from pathlib import Path
 from subprocess import CompletedProcess
+from typing import List, Tuple
 
 from carnage.core.config import Configuration, get_config
 
-# Available privilege escalation backends
+# -------------------------
+# Logging
+# -------------------------
+
+LOG_DIR = Path.home() / ".cache" / "carnage"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+LOG_FILE = LOG_DIR / "carnage.log"
+
+logging.basicConfig(
+    filename=LOG_FILE,
+    level=logging.DEBUG,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+
+log = logging.getLogger("carnage.privilege")
+
+# -------------------------
+# Privilege backends
+# -------------------------
+
 BACKENDS: dict[str, str] = {
     "pkexec": "pkexec",
     "sudo": "sudo",
@@ -15,88 +38,81 @@ BACKENDS: dict[str, str] = {
 
 
 def detect_backend() -> str | None:
-    """
-    Detect available privilege escalation backend.
-
-    Returns:
-        The first available backend name, or None if none found.
-    """
     for backend, cmd in BACKENDS.items():
         if shutil.which(cmd):
+            log.debug("Detected backend: %s", backend)
             return backend
+    log.warning("No privilege backend detected")
     return None
 
 
 def get_configured_backend() -> str | None:
-    """
-    Get privilege backend from configuration or auto-detect.
-
-    Returns:
-        Configured backend name, auto-detected backend, or None
-    """
     config: Configuration = get_config()
-    backend_str: str = config.privilege_backend.lower()
 
-    print(backend_str)
-
-    # Handle auto-detection
-    if backend_str == "auto":
+    backend_raw = config.privilege_backend
+    if not backend_raw:
+        log.debug("No backend configured, auto-detecting")
         return detect_backend()
 
-    # Handle 'none' explicitly
-    if backend_str == "none":
+    backend = backend_raw.strip().lower()
+    log.debug("Configured backend: %s", backend)
+
+    if backend == "auto":
+        return detect_backend()
+
+    if backend == "none":
         return None
 
-    # Validate configured backend
-    if backend_str in BACKENDS:
-        return backend_str
+    if backend in BACKENDS:
+        return backend
 
-    # Invalid backend in config, fall back to auto-detection
+    log.warning("Invalid backend '%s', falling back to auto", backend)
     return detect_backend()
 
 
 def run_privileged(
-        cmd: list[str],
-        backend: str | None = None,
-        use_terminal: bool | None = None
-) -> tuple[int, str, str]:
-    """
-    Run a command with privilege escalation.
+    cmd: List[str],
+    backend: str | None = None,
+    use_terminal: bool | None = None,
+) -> Tuple[int, str, str]:
 
-    Args:
-        cmd: Command and arguments to run.
-        backend: Specific backend to use (e.g., 'sudo', 'pkexec').
-                 If None, use configured backend.
-        use_terminal: Whether to run the command in a terminal.
-                      If None, defaults to True if terminal is configured.
-
-    Returns:
-        Tuple of (return_code, stdout, stderr)
-    """
     if backend is None:
         backend = get_configured_backend()
 
     config: Configuration = get_config()
-    terminal_cmd: list[str] = config.terminal
+    terminal_cmd: List[str] = config.terminal or []
 
-    # Determine if we should use terminal
     if use_terminal is None:
-        use_terminal = bool(terminal_cmd)  # Use terminal if configured
+        use_terminal = bool(terminal_cmd)
 
-    full_cmd: list[str] = cmd
+    full_cmd: List[str] = list(cmd)
 
-    # Apply privilege escalation if backend is available
     if backend and backend in BACKENDS:
-        full_cmd = [BACKENDS[backend]] + cmd
+        full_cmd = [BACKENDS[backend]] + full_cmd
 
-    # Apply terminal if requested and configured
     if use_terminal and terminal_cmd:
         full_cmd = terminal_cmd + full_cmd
 
-    result: CompletedProcess[str] = subprocess.run(
-        full_cmd,
-        capture_output=True,
-        text=True
-    )
+    log.info("Executing: %s", " ".join(full_cmd))
+    log.info("Backend=%s Terminal=%s", backend, use_terminal)
 
-    return result.returncode, result.stdout, result.stderr
+    try:
+        result: CompletedProcess[str] = subprocess.run(
+            full_cmd,
+            capture_output=True,
+            text=True,
+        )
+
+        log.info("Return code: %d", result.returncode)
+
+        if result.stdout:
+            log.debug("STDOUT:\n%s", result.stdout)
+
+        if result.stderr:
+            log.debug("STDERR:\n%s", result.stderr)
+
+        return result.returncode, result.stdout, result.stderr
+
+    except Exception as e:
+        log.exception("Execution failed")
+        return 1, "", str(e)
