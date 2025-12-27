@@ -1,54 +1,70 @@
-"""Basic interactions with eix for package management."""
+"""
+Basic interactions with eix for package management.
+"""
 
+from __future__ import annotations
+
+import logging
 import shutil
 import subprocess
 from subprocess import CompletedProcess
 
+logger = logging.getLogger(__name__)
+
 _remote_cache_available: bool | None = None
+
 
 def is_found() -> bool:
     """
     Check if eix is installed and available.
-
-    Returns:
-        True if eix is found, False otherwise
     """
-    return shutil.which("eix") is not None
+    found = shutil.which("eix") is not None
+    logger.debug("eix found: %s", found)
+    return found
 
 
 def has_cache() -> bool:
     """
-    Check if eix cache exists and is valid.
-
-    Returns:
-        True if cache exists, False otherwise
+    Check if eix local cache exists and is valid.
     """
-    result: CompletedProcess[str] = subprocess.run(
-        ["eix", "-Qq0"],
-        capture_output=True,
-        text=True
-    )
-    return result.returncode == 0
+    try:
+        result: CompletedProcess[str] = subprocess.run(
+            ["eix", "-Qq0"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        ok = result.returncode == 0
+        logger.debug("eix local cache available: %s", ok)
+        return ok
+    except FileNotFoundError:
+        logger.warning("eix not found while checking local cache")
+        return False
 
 
 def has_remote_cache() -> bool:
     """
     Check if eix remote cache exists and is valid.
 
-    Uses global caching to avoid repeated subprocess calls.
-
-    Returns:
-        True if remote cache exists, False otherwise
+    Uses cached result to avoid repeated subprocess calls.
     """
     global _remote_cache_available
 
-    if _remote_cache_available is None:
+    if _remote_cache_available is not None:
+        return _remote_cache_available
+
+    try:
         result: CompletedProcess[str] = subprocess.run(
             ["eix", "-QRq0"],
             capture_output=True,
-            text=True
+            text=True,
+            check=False,
         )
         _remote_cache_available = result.returncode == 0
+        logger.debug("eix remote cache available: %s", _remote_cache_available)
+    except FileNotFoundError:
+        logger.warning("eix not found while checking remote cache")
+        _remote_cache_available = False
 
     return _remote_cache_available
 
@@ -56,58 +72,71 @@ def has_remote_cache() -> bool:
 def has_protobuf_support() -> bool:
     """
     Check if eix was compiled with protobuf support.
-
-    Returns:
-        True if protobuf support is available, False otherwise
     """
-    result: CompletedProcess[str] = subprocess.run(
-        ["eix", "-Qq0", "--proto"],
-        capture_output=True,
-        text=True
-    )
-    return result.returncode == 0
+    try:
+        result: CompletedProcess[str] = subprocess.run(
+            ["eix", "-Qq0", "--proto"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        ok = result.returncode == 0
+        logger.debug("eix protobuf support: %s", ok)
+        return ok
+    except FileNotFoundError:
+        logger.warning("eix not found while checking protobuf support")
+        return False
+
 
 def eix_update() -> tuple[int, str, str]:
     """
-    Update the eix cache.
+    Update the eix local cache.
 
     Wraps: eix-update
-
-    Note: Does not require root privileges.
-
-    Returns:
-        Tuple of (return_code, stdout, stderr)
     """
-    result: CompletedProcess[str] = subprocess.run(
-        ["eix-update"],
-        capture_output=True,
-        text=True
-    )
+    logger.info("Executing: eix-update")
 
-    return result.returncode, result.stdout, result.stderr
+    try:
+        result: CompletedProcess[str] = subprocess.run(
+            ["eix-update"],
+            capture_output=True,
+            text=True,
+        )
+        logger.info("eix-update return code: %s", result.returncode)
+        return result.returncode, result.stdout, result.stderr
+    except FileNotFoundError as e:
+        logger.error("eix-update failed: %s", e)
+        return 127, "", str(e)
 
 
 def eix_remote_update() -> tuple[int, str, str]:
     """
-    Update the eix remote cache for packages not in local repositories.
+    Update the eix remote cache.
 
     Wraps: eix-remote update
 
-    Note: Requires root privileges if remote cache does not exist.
-          If the cache exists, runs without privilege escalation.
-
-    Returns:
-        Tuple of (return_code, stdout, stderr)
+    Root is required only if the cache does not exist.
     """
     if has_remote_cache():
-        # Cache exists, no root needed
-        result: CompletedProcess[str] = subprocess.run(
-            ["eix-remote", "update"],
-            capture_output=True,
-            text=True
-        )
-        return result.returncode, result.stdout, result.stderr
-    else:
-        # Cache doesn't exist, needs root to create
-        from ..privilege import run_privileged
-        return run_privileged(["eix-remote", "update"], None, False)
+        logger.info("Executing: eix-remote update (no privilege escalation)")
+        try:
+            result: CompletedProcess[str] = subprocess.run(
+                ["eix-remote", "update"],
+                capture_output=True,
+                text=True,
+            )
+            logger.info("eix-remote update return code: %s", result.returncode)
+            return result.returncode, result.stdout, result.stderr
+        except FileNotFoundError as e:
+            logger.error("eix-remote failed: %s", e)
+            return 127, "", str(e)
+
+    # Cache does not exist → needs root
+    logger.info("Executing: eix-remote update (privileged)")
+    from carnage.core.privilege import run_privileged
+
+    return run_privileged(
+        ["eix-remote", "update"],
+        backend=None,
+        use_terminal=False,
+    )
